@@ -80,6 +80,12 @@ function ui(id) {
 
 // Derived lookups: stable colors per kind, entry maps, option labels.
 function decorate(project) {
+  // The server normalizes shapes; keep the client safe against older servers too.
+  for (const e of project.catalog) {
+    e.kind = typeof e.kind === "string" && e.kind ? e.kind : "unknown";
+    e.source = typeof e.source === "string" ? e.source : "";
+    for (const key of ["usages", "tags", "constraints"]) if (!Array.isArray(e[key])) e[key] = [];
+  }
   const kinds = Object.entries(project.catalog.reduce((acc, e) => ((acc[e.kind] = (acc[e.kind] || 0) + 1), acc), {}))
     .sort((a, b) => b[1] - a[1]);
   project.kindList = kinds;
@@ -90,40 +96,70 @@ function decorate(project) {
   return project;
 }
 const kindColor = (project, kind) => project.kindColor?.[kind] || "var(--kind-other)";
+const text = (value) => (typeof value === "string" ? value : "");
 function optionInfo(project, option) {
-  if (option === "create") return { label: "create", color: "var(--opt-create)" };
-  if (option === "insufficient_evidence") return { label: "insufficient evidence", color: "var(--opt-insufficient)" };
-  const match = /^(reuse|modify|wrap):(.+)$/.exec(option || "");
-  if (!match) return { label: option || "—", color: "var(--kind-other)" };
+  const value = text(option);
+  if (value === "create") return { label: "create", color: "var(--opt-create)" };
+  if (value === "insufficient_evidence") return { label: "insufficient evidence", color: "var(--opt-insufficient)" };
+  const match = /^(reuse|modify|wrap):(.+)$/.exec(value);
+  if (!match) return { label: value || "—", color: "var(--kind-other)" };
   const entry = project.byId.get(match[2]);
   return { label: `${match[1]} · ${entry?.name || match[2]}`, color: `var(--opt-${match[1]})`, entry: entry?.id };
 }
-function relation(value = "") {
-  if (value.startsWith("agree")) return { cls: "ok", label: "Agrees with Jev" };
-  if (value.startsWith("disagree")) return { cls: "warn", label: "Overrides Jev" };
+function relation(value) {
+  const verdict = text(value);
+  if (verdict.startsWith("agree")) return { cls: "ok", label: "Agrees with provider" };
+  if (verdict.startsWith("disagree")) return { cls: "warn", label: "Overrides provider" };
   return { cls: "muted", label: "No verdict" };
+}
+const providerOption = (d) => (d.provider_primary ? `${text(d.provider_action)}:${d.provider_primary}` : d.provider_action);
+const providerName = (d) => text(d.model) || text(d.provider) || "unknown";
+
+// Live region: route titles and result counts only, debounced.
+const announcer = $("#announcer");
+let announceTimer;
+function announce(message) {
+  clearTimeout(announceTimer);
+  announceTimer = setTimeout(() => {
+    announcer.textContent = "";
+    requestAnimationFrame(() => (announcer.textContent = message));
+  }, 350);
 }
 
 // Routing --------------------------------------------------------------------
 function parseRoute() {
-  const parts = location.hash.split("?")[0].replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
+  let parts;
+  try {
+    parts = location.hash.split("?")[0].replace(/^#\/?/, "").split("/").filter(Boolean).map(decodeURIComponent);
+  } catch {
+    return { view: "invalid" };
+  }
   if (parts[0] !== "p" || !parts[1]) return { view: "home" };
   return { view: parts[2] || "overview", project: parts[1], item: parts[3] || null };
 }
 const href = (project, view = "overview", item) =>
   `#/p/${encodeURIComponent(project)}${view === "overview" && !item ? "" : `/${view}`}${item ? `/${encodeURIComponent(item)}` : ""}`;
+const hashParam = (name) => new URLSearchParams(location.hash.split("?")[1] || "").get(name);
 
 let current = { key: null };
+let navToken = 0;
 async function render() {
+  // Every navigation takes a token; a slower, older render must not overwrite a newer route.
+  const token = ++navToken;
   const route = parseRoute();
-  const key = route.view === "home" ? "home" : `${route.project}/${route.view}`;
+  const key = route.view === "home" || route.view === "invalid" ? route.view : `${route.project}/${route.view}`;
   // Same master-detail view: update the detail pane in place.
   if (key === current.key && (route.view === "catalog" || route.view === "decisions")) {
     current.route = route;
-    return route.view === "catalog" ? selectEntry(route.item) : selectDecision(route.item);
+    if (route.view === "decisions") return selectDecision(route.item);
+    const project = state.details.get(route.project);
+    if (project && applyKindParam(project)) renderEntryList(true);
+    return selectEntry(route.item);
   }
   let html;
+  let failure = null;
   try {
+    if (route.view === "invalid") throw new Error("This address is not valid");
     if (route.view === "home") html = await homeView();
     else {
       await loadProjects();
@@ -131,16 +167,20 @@ async function render() {
       html = shell(project, route, await projectView(project, route));
     }
   } catch (error) {
+    failure = error.message;
     html = errorView(error);
   }
+  if (token !== navToken) return;
   const first = current.key === null;
   current = { key, route };
   swap(() => {
+    if (token !== navToken) return;
     app.innerHTML = html;
     hydrate(app);
     afterRender(route, first);
   });
-  updateSwitcher(route);
+  const label = updateSwitcher(route);
+  if (!first) announce(failure || label);
 }
 function swap(update) {
   if (document.startViewTransition && !reducedMotion.matches) document.startViewTransition(update);
@@ -169,10 +209,13 @@ function countUp(el, target) {
 }
 function afterRender(route, first) {
   moveIndicator(first);
-  if (route.view === "catalog") { renderEntryList(); selectEntry(route.item, true); }
+  if (route.view === "catalog") { renderEntryList(); selectEntry(route.item, { initial: true }); }
   if (route.view === "decisions") selectDecision(route.item, true);
   if (route.view === "inventory") renderInventory();
-  if (!first) window.scrollTo({ top: 0, behavior: "instant" });
+  if (first) return;
+  window.scrollTo({ top: 0, behavior: "instant" });
+  // Move focus to the new page heading so keyboard and screen reader users start there.
+  ($("h1.title", app) || app).focus({ preventScroll: true });
 }
 function moveIndicator(instant) {
   const active = $(".tab[aria-current='page']");
@@ -215,8 +258,8 @@ async function homeView() {
     <div class="page-head">
       <div>
         <div class="eyebrow">Local stores</div>
-        <h1 class="title">Tessera projects</h1>
-        <p class="lede">Component and utility catalogs curated for each repository, with the decisions Jev and the agent made on top of them. Everything is read from this machine; nothing is uploaded.</p>
+        <h1 class="title" tabindex="-1">Tessera projects</h1>
+        <p class="lede">Component and utility catalogs curated for each repository, with the reuse decisions the provider (for example Jev) and the agent made on top of them. Everything is read from this machine; nothing is uploaded.</p>
       </div>
     </div>
     ${projects.length ? `<div class="grid projects">${cards}</div>` : `<div class="card empty rise">${icon("inbox")}
@@ -227,7 +270,11 @@ async function homeView() {
 }
 
 function statusPill(p) {
-  if (!p.initialized) return `<span class="pill muted">Not initialized</span>`;
+  if (!p.initialized) {
+    return p.files
+      ? `<span class="pill warn">Initializing · ${nf.format(p.reviewed || 0)}/${nf.format(p.files)} reviewed</span>`
+      : `<span class="pill muted">Not initialized</span>`;
+  }
   return p.finalized ? `<span class="pill ok">Finalized at ${esc(short(p.revision))}</span>` : `<span class="pill warn">Finalization pending</span>`;
 }
 
@@ -243,7 +290,7 @@ function shell(project, route, body) {
     <div class="page-head">
       <div>
         <div class="eyebrow">Project</div>
-        <h1 class="title">${esc(project.name)}</h1>
+        <h1 class="title" tabindex="-1">${esc(project.name)}</h1>
         <div class="meta-row">
           ${statusPill(project)}
           ${project.repo_path ? `<span>${icon("folder")} <span class="mono">${esc(project.repo_path)}</span></span>` : ""}
@@ -281,19 +328,21 @@ function overviewView(project) {
   const invColor = { catalogued: "var(--accent)", supporting: "var(--code-400)", excluded: "var(--neutral-600)", protected: "var(--danger)", pending: "var(--warning)" };
   const invTotal = project.inventory.length || 1;
   const decisions = project.decision_list;
-  const agree = decisions.filter((d) => (d.relation_to_provider || "").startsWith("agree")).length;
+  const agree = decisions.filter((d) => relation(d.relation_to_provider).cls === "ok").length;
   const folders = Object.entries(project.catalog.reduce((acc, e) => {
-    const key = e.source.split("/").slice(0, e.source.startsWith("app/") ? 2 : 1).join("/");
+    const key = e.source.split("/").slice(0, e.source.startsWith("app/") ? 2 : 1).join("/") || "(no source)";
     acc[key] = (acc[key] || 0) + 1;
     return acc;
   }, {})).sort((a, b) => b[1] - a[1]).slice(0, 8);
 
-  // Group tesserae by kind so the mosaic reads as a composition.
+  // Group tesserae by kind so the mosaic reads as a composition. The stagger
+  // shrinks with the entry count so the whole mosaic settles within ~600 ms.
   let t = 0;
+  const step = Math.min(4, 80 / Math.max(1, project.catalog.length));
   const tiles = project.kindList.flatMap(([kind]) => project.catalog.filter((e) => e.kind === kind).map((e) =>
     `<a class="tessera ${e.usages?.length ? "" : "gap"}" href="${href(project.id, "catalog", e.id)}" data-kind="${esc(e.kind)}"
       data-tip="${esc(e.name || e.id)}" data-tip-sub="${esc(`${e.kind} · ${e.source}`)}" aria-label="${esc(`${e.name || e.id}, ${e.kind}`)}"
-      ${vars({ "--c": kindColor(project, e.kind), "--i": t++ })}></a>`)).join("");
+      ${vars({ "--c": kindColor(project, e.kind), "--d": `${Math.round(t++ * step)}ms` })}></a>`)).join("");
   const legend = project.kindList.map(([kind, n]) =>
     `<button class="chip" type="button" data-action="mosaic-kind" data-arg="${esc(kind)}" aria-pressed="false"><i class="kind-dot" ${vars({ "--c": kindColor(project, kind) })}></i>${esc(kind)} <small>${n}</small></button>`).join("");
 
@@ -301,7 +350,7 @@ function overviewView(project) {
       ${kpi(0, "Catalog entries", project.catalog.length, `${project.kindList.length} kinds`, "var(--code-400)", "grid")}
       ${kpi(1, "Inventory files", project.inventory.length, `${project.scope.length} in scope`, "var(--info)", "file")}
       ${kpi(2, "Usage gaps", project.gaps, "entries without a recorded consumer", "var(--warning)", "alert")}
-      ${kpi(3, "Decisions", decisions.length, decisions.length ? `${agree} of ${decisions.length} agree with Jev` : "none yet", "var(--success)", "scale")}
+      ${kpi(3, "Decisions", decisions.length, decisions.length ? `${agree} of ${decisions.length} agree with the provider` : "none yet", "var(--success)", "scale")}
     </div>
     <div class="grid cols-2 mt-16">
       <section class="card span-2 rise" ${vars({ "--i": 4 })}>
@@ -340,26 +389,25 @@ function overviewView(project) {
 function kpi(i, label, value, foot, tone, ic) {
   return `<div class="card kpi rise" ${vars({ "--i": i, "--tone": tone })}>
     <span class="kpi-label">${icon(ic)} ${esc(label)}</span>
-    <span class="kpi-value" data-count="${value}">${nf.format(value)}</span>
+    <span class="kpi-value"><span aria-hidden="true" data-count="${value}">${nf.format(value)}</span><span class="sr-only">${nf.format(value)}</span></span>
     <span class="kpi-foot">${esc(foot)}</span>
   </div>`;
 }
 
 function decisionLine(project, d) {
   const rel = relation(d.relation_to_provider);
-  const jev = optionInfo(project, d.provider_primary ? `${d.provider_action}:${d.provider_primary}` : d.provider_action);
+  const provider = optionInfo(project, providerOption(d));
   return `<a class="row" href="${href(project.id, "decisions", d.task_id)}">
     <div class="row-main"><div class="row-title mono">${esc(d.task_id)}</div>
-      <div class="decision-flow"><span>Jev <b>${esc(jev.label)}</b></span>${icon("arrow")}<span>Agent <b>${esc(firstWord(d.agent_final_choice))}</b></span></div></div>
+      <div class="decision-flow"><span>Provider <b>${esc(provider.label)}</b></span>${icon("arrow")}<span>Agent <b>${esc(firstWord(d.agent_final_choice))}</b></span></div></div>
     <span class="pill ${rel.cls}">${rel.label}</span></a>`;
 }
-const firstWord = (text) => String(text || "—").split(" (")[0];
+const firstWord = (value) => text(value).split(" (")[0] || "—";
 
 // Catalog ----------------------------------------------------------------------
 function catalogView(project) {
   const filters = ui(project.id);
-  const kindParam = new URLSearchParams(location.hash.split("?")[1] || "").get("kind");
-  if (kindParam) filters.kinds = new Set([kindParam]);
+  applyKindParam(project);
   const chips = project.kindList.map(([kind, n]) =>
     `<button class="chip" type="button" data-action="kind" data-arg="${esc(kind)}" aria-pressed="${filters.kinds.has(kind)}"><i class="kind-dot" ${vars({ "--c": kindColor(project, kind) })}></i>${esc(kind)} <small>${n}</small></button>`).join("");
   return `<div class="toolbar">
@@ -368,9 +416,19 @@ function catalogView(project) {
     </div>
     <div class="chips mb-16">${chips}</div>
     <div class="split">
-      <section class="card list-panel rise"><div class="list-head"><span id="entry-count"></span><span>kind · source</span></div><div class="list" id="entry-list" role="listbox" aria-label="Catalog entries"></div></section>
+      <section class="card list-panel rise"><div class="list-head"><span id="entry-count"></span><span>kind · source</span></div><nav aria-label="Catalog entries"><ul class="list" id="entry-list"></ul></nav></section>
       <section class="card detail rise" id="entry-detail" ${vars({ "--i": 1 })}></section>
     </div>`;
+}
+
+// A `?kind=` hash parameter selects exactly that kind; chips mirror the filter.
+function applyKindParam(project) {
+  const kind = hashParam("kind");
+  if (!kind) return false;
+  const filters = ui(project.id);
+  filters.kinds = new Set([kind]);
+  for (const chip of $$("[data-action='kind']")) chip.setAttribute("aria-pressed", String(filters.kinds.has(chip.dataset.arg)));
+  return true;
 }
 
 function filteredEntries(project) {
@@ -380,27 +438,34 @@ function filteredEntries(project) {
     (!q || [e.id, e.name, e.source, e.summary, e.contract, ...(e.tags || [])].join(" ").toLowerCase().includes(q)));
 }
 
-function renderEntryList() {
+function renderEntryList(announceCount = false) {
   const project = state.details.get(current.route.project);
   const list = $("#entry-list");
   if (!project || !list) return;
   const q = ui(project.id).query.trim().toLowerCase();
   const rows = filteredEntries(project);
-  $("#entry-count").textContent = `${nf.format(rows.length)} of ${nf.format(project.catalog.length)} entries`;
-  list.innerHTML = rows.length ? rows.map((e) => `<a class="row" role="option" href="${href(project.id, "catalog", e.id)}" data-id="${esc(e.id)}" aria-current="${e.id === current.route.item}">
+  const count = `${nf.format(rows.length)} of ${nf.format(project.catalog.length)} entries`;
+  $("#entry-count").textContent = count;
+  if (announceCount) announce(count);
+  list.innerHTML = rows.length ? rows.map((e) => `<li><a class="row" href="${href(project.id, "catalog", e.id)}" data-id="${esc(e.id)}"${e.id === current.route.item ? ' aria-current="true"' : ""}>
       <i class="kind-dot" ${vars({ "--c": kindColor(project, e.kind) })}></i>
       <div class="row-main"><div class="row-title">${highlight(e.name || e.id, q)}</div><div class="row-sub">${highlight(e.source, q)}</div></div>
-      <span class="row-side">${esc(e.kind)}</span></a>`).join("")
-    : `<div class="empty">${icon("search")}<span>No entries match these filters.</span></div>`;
+      <span class="row-side">${esc(e.kind)}</span></a></li>`).join("")
+    : `<li class="empty">${icon("search")}<span>No entries match these filters.</span></li>`;
   hydrate(list);
 }
 
-function selectEntry(id, initial = false) {
+// `scroll` brings the detail pane into view on narrow screens after a click or tap;
+// keyboard walking through the list keeps the viewport still.
+function selectEntry(id, { initial = false, scroll = !initial } = {}) {
   const project = state.details.get(current.route.project);
   const pane = $("#entry-detail");
   if (!project || !pane) return;
   const entry = project.byId.get(id) || (initial && !id ? filteredEntries(project)[0] : null);
-  for (const row of $$("#entry-list .row")) row.setAttribute("aria-current", String(row.dataset.id === entry?.id));
+  for (const row of $$("#entry-list .row")) {
+    if (row.dataset.id === entry?.id) row.setAttribute("aria-current", "true");
+    else row.removeAttribute("aria-current");
+  }
   if (!entry) {
     pane.innerHTML = `<div class="empty">${icon("grid")}<span>${id ? "This entry no longer exists in the catalog." : "Select an entry to inspect its contract."}</span></div>`;
     return;
@@ -419,7 +484,7 @@ function selectEntry(id, initial = false) {
     <div class="section"><h3>Usages ${entry.usages?.length ? `<span class="count">${entry.usages.length}</span>` : ""}</h3>${usages}</div>
   </div>`;
   hydrate(pane);
-  if (!initial && innerWidth <= 900) pane.scrollIntoView({ behavior: reducedMotion.matches ? "auto" : "smooth", block: "start" });
+  if (scroll && innerWidth <= 900) pane.scrollIntoView({ behavior: reducedMotion.matches ? "auto" : "smooth", block: "start" });
 }
 
 // Inventory ------------------------------------------------------------------
@@ -438,7 +503,7 @@ function inventoryView(project) {
       <div class="table-wrap"><table class="table"><thead><tr><th>Path</th><th>Review</th><th>Reason</th></tr></thead><tbody id="inventory-body"></tbody></table></div>
     </section>`;
 }
-function renderInventory() {
+function renderInventory(announceCount = false) {
   const project = state.details.get(current.route.project);
   const body = $("#inventory-body");
   if (!project || !body) return;
@@ -447,7 +512,9 @@ function renderInventory() {
   const tone = { catalogued: "ok", supporting: "muted", excluded: "muted", protected: "danger", pending: "warn" };
   const rows = project.inventory.filter((f) => (inventoryKind === "all" || f.kind === inventoryKind) &&
     (!q || `${f.path} ${f.reason || ""}`.toLowerCase().includes(q)));
-  $("#inventory-count").textContent = `${nf.format(rows.length)} of ${nf.format(project.inventory.length)} files`;
+  const count = `${nf.format(rows.length)} of ${nf.format(project.inventory.length)} files`;
+  $("#inventory-count").textContent = count;
+  if (announceCount) announce(count);
   body.innerHTML = rows.map((f) => {
     const entry = project.bySource.get(f.path);
     const path = entry ? `<a class="link" href="${href(project.id, "catalog", entry.id)}">${highlight(f.path, q)}</a>` : highlight(f.path, q);
@@ -461,11 +528,11 @@ function decisionsView(project) {
   if (!project.decision_list.length) return `<div class="card empty rise">${icon("scale")}<b>No decisions yet</b><span>Decisions appear after <code>prepare</code> and <code>evaluate</code> runs are reviewed.</span></div>`;
   const cards = project.decision_list.map((d, i) => {
     const rel = relation(d.relation_to_provider);
-    const jev = optionInfo(project, d.provider_primary ? `${d.provider_action}:${d.provider_primary}` : d.provider_action);
+    const provider = optionInfo(project, providerOption(d));
     return `<a class="card decision-card rise" href="${href(project.id, "decisions", d.task_id)}" data-task="${esc(d.task_id)}" ${vars({ "--i": i })}>
       <div class="meta-row m-0"><span class="pill ${rel.cls}">${rel.label}</span><span>${esc(d.reviewed_on || "")}</span></div>
       <h3>${esc(d.task_id)}</h3>
-      <div class="decision-flow"><span>Jev <b>${esc(jev.label)}</b></span>${icon("arrow")}<span>Agent <b>${esc(firstWord(d.agent_final_choice))}</b></span></div>
+      <div class="decision-flow"><span>Provider <b>${esc(provider.label)}</b></span>${icon("arrow")}<span>Agent <b>${esc(firstWord(d.agent_final_choice))}</b></span></div>
     </a>`;
   }).join("");
   return `<div class="split"><div class="grid" id="decision-list">${cards}</div><section class="card detail" id="decision-detail"></section></div>`;
@@ -476,19 +543,24 @@ async function selectDecision(task, initial = false) {
   const pane = $("#decision-detail");
   if (!project || !pane) return;
   const id = task || (initial ? project.decision_list[0]?.task_id : null);
-  for (const card of $$("#decision-list .decision-card")) card.style.borderColor = card.dataset.task === id ? "var(--accent)" : "";
+  for (const card of $$("#decision-list .decision-card")) {
+    if (card.dataset.task === id) card.setAttribute("aria-current", "true");
+    else card.removeAttribute("aria-current");
+  }
   if (!id) return;
   pane.innerHTML = skeletons();
   hydrate(pane);
-  let d;
+  // The user may have picked another decision or left the view while loading.
+  const stillCurrent = () => pane.isConnected && current.route?.view === "decisions" && current.route.project === project.id &&
+    (current.route.item || project.decision_list[0]?.task_id) === id;
+  let html;
   try {
-    d = await loadDecision(project.id, id);
+    html = decisionDetail(project, await loadDecision(project.id, id));
   } catch (error) {
-    pane.innerHTML = `<div class="empty">${icon("alert")}<span>${esc(error.message)}</span></div>`;
-    return;
+    html = `<div class="empty">${icon("alert")}<span>${esc(error.message)}</span></div>`;
   }
-  if (current.route.project !== project.id || (current.route.item || project.decision_list[0]?.task_id) !== id) return;
-  pane.innerHTML = decisionDetail(project, d);
+  if (!stillCurrent()) return;
+  pane.innerHTML = html;
   hydrate(pane);
   if (!initial && innerWidth <= 900) pane.scrollIntoView({ behavior: reducedMotion.matches ? "auto" : "smooth", block: "start" });
 }
@@ -498,8 +570,8 @@ const skeletons = () => [["60%", "28px"], ["100%", "92px"], ["100%", "180px"]]
 function decisionDetail(project, d) {
   const rel = relation(d.relation_to_provider);
   const trace = d.trace || { batches: [], alternatives: [], final: [], manifest: {} };
-  const jevOption = d.provider_primary ? `${d.provider_action}:${d.provider_primary}` : d.provider_action;
-  const jev = optionInfo(project, jevOption);
+  const provider = optionInfo(project, providerOption(d));
+  const choice = text(d.agent_final_choice);
   const toRows = (pairs) => pairs.map(([option, p]) => {
     const info = optionInfo(project, option);
     return { label: info.label, title: option, value: p, color: info.color, dot: true, href: info.entry ? href(project.id, "catalog", info.entry) : null };
@@ -515,14 +587,14 @@ function decisionDetail(project, d) {
     <div class="meta-row mt-0"><span class="pill ${rel.cls}">${rel.label}</span><span>${icon("clock")} ${esc(d.reviewed_on || "")}</span><span>${esc(d.review_status || "")}</span></div>
     <h2 class="mono mt-10 task-title">${esc(d.task_id)}</h2>
     ${d.task ? `<div class="section"><h3>Requirement</h3><p>${esc(d.task.requirement)}</p></div>
-      <div class="section"><h3>Acceptance</h3><ol class="acceptance">${(d.task.acceptance || []).map((a) => `<li>${esc(a)}</li>`).join("")}</ol></div>` : ""}
+      <div class="section"><h3>Acceptance</h3><ol class="acceptance">${(Array.isArray(d.task.acceptance) ? d.task.acceptance : []).map((a) => `<li>${esc(a)}</li>`).join("")}</ol></div>` : ""}
     <div class="section"><h3>Verdict</h3>
       <div class="verdict">
-        <div class="verdict-side"><small>Jev · ${esc(d.model || d.provider)}</small><b>${esc(jev.label)}</b></div>
+        <div class="verdict-side"><small>Provider · ${esc(providerName(d))}</small><b>${esc(provider.label)}</b></div>
         <div class="verdict-link">${icon("compare")}</div>
-        <div class="verdict-side"><small>Agent final choice</small><b>${esc(firstWord(d.agent_final_choice))}</b>${d.agent_final_choice?.includes("(") ? `<span class="mono">${esc(d.agent_final_choice.slice(d.agent_final_choice.indexOf("(")))}</span>` : ""}</div>
+        <div class="verdict-side"><small>Agent final choice</small><b>${esc(firstWord(choice))}</b>${choice.includes("(") ? `<span class="mono">${esc(choice.slice(choice.indexOf("(")))}</span>` : ""}</div>
       </div>
-      <p class="relation">${esc(d.relation_to_provider || "")}</p>
+      <p class="relation">${esc(text(d.relation_to_provider))}</p>
     </div>
     ${trace.final.length ? `<div class="section"><h3>Final round probabilities</h3>${barList(toRows(trace.final), { format: pct })}</div>` : ""}
     ${trace.batches.length ? `<div class="section"><h3>Batch choices · ${trace.batches.length} calls</h3><div class="batches">${batches}</div>
@@ -554,12 +626,12 @@ document.addEventListener("click", (event) => {
     kinds.has(arg) ? kinds.delete(arg) : kinds.add(arg);
     target.setAttribute("aria-pressed", String(kinds.has(arg)));
     if (location.hash.includes("?")) history.replaceState(null, "", location.hash.split("?")[0]);
-    renderEntryList();
+    renderEntryList(true);
   }
   if (target.dataset.action === "inventory-kind" && project) {
     ui(project.id).inventoryKind = arg;
     for (const b of $$("[data-action='inventory-kind']")) b.setAttribute("aria-pressed", String(b === target));
-    renderInventory();
+    renderInventory(true);
   }
   if (target.dataset.action === "mosaic-kind") {
     const pressed = target.getAttribute("aria-pressed") !== "true";
@@ -577,18 +649,23 @@ document.addEventListener("input", (event) => {
   if (event.target.id === "entry-search") {
     ui(project.id).query = event.target.value;
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(renderEntryList, 80);
+    searchTimer = setTimeout(() => renderEntryList(true), 80);
   }
   if (event.target.id === "inventory-search") {
     ui(project.id).inventoryQuery = event.target.value;
     clearTimeout(searchTimer);
-    searchTimer = setTimeout(renderInventory, 80);
+    searchTimer = setTimeout(() => renderInventory(true), 80);
   }
 });
 
-// Tooltips for mosaic tiles and batch cells.
+// Tooltips for mosaic tiles and batch cells. The tooltip describes the element
+// it belongs to while shown and leaves the accessibility tree when hidden.
 const tooltip = $("#tooltip");
+let tipOwner = null;
 function showTip(el) {
+  if (tipOwner && tipOwner !== el) tipOwner.removeAttribute("aria-describedby");
+  tipOwner = el;
+  el.setAttribute("aria-describedby", "tooltip");
   tooltip.innerHTML = `<b>${esc(el.dataset.tip)}</b>${el.dataset.tipSub ? `<span>${esc(el.dataset.tipSub)}</span>` : ""}`;
   const rect = el.getBoundingClientRect();
   tooltip.classList.add("show");
@@ -598,13 +675,18 @@ function showTip(el) {
   tooltip.style.left = `${left}px`;
   tooltip.style.top = `${top}px`;
 }
-const hideTip = () => tooltip.classList.remove("show");
+function hideTip() {
+  tooltip.classList.remove("show");
+  tipOwner?.removeAttribute("aria-describedby");
+  tipOwner = null;
+}
 document.addEventListener("pointerover", (e) => { const el = e.target.closest("[data-tip]"); el ? showTip(el) : hideTip(); });
 document.addEventListener("focusin", (e) => { const el = e.target.closest("[data-tip]"); el ? showTip(el) : hideTip(); });
 addEventListener("scroll", hideTip, { passive: true });
 
 // Keyboard: "/" focuses search, Ctrl/Cmd+K opens the palette, arrows walk lists.
 document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && tooltip.classList.contains("show")) hideTip();
   if ((event.ctrlKey || event.metaKey) && event.key.toLowerCase() === "k") {
     event.preventDefault();
     openPalette();
@@ -624,7 +706,7 @@ document.addEventListener("keydown", (event) => {
     const next = rows[Math.max(0, Math.min(rows.length - 1, index + (event.key === "ArrowDown" ? 1 : -1)))];
     history.replaceState(null, "", next.getAttribute("href"));
     current.route = parseRoute();
-    selectEntry(next.dataset.id);
+    selectEntry(next.dataset.id, { scroll: false });
     next.scrollIntoView({ block: "nearest" });
     if (document.activeElement?.id !== "entry-search") next.focus();
   }
@@ -665,12 +747,16 @@ function renderPalette() {
   const q = paletteInput.value.trim().toLowerCase();
   paletteItems = paletteSource().filter((item) => !q || `${item.label} ${item.hint} ${item.text || ""}`.toLowerCase().includes(q)).slice(0, 60);
   paletteIndex = 0;
-  let group = null;
-  paletteList.innerHTML = paletteItems.map((item, i) => {
-    const heading = item.group !== group ? `<div class="palette-group">${esc((group = item.group))}</div>` : "";
-    return `${heading}<button class="palette-item" type="button" role="option" id="pi-${i}" data-index="${i}" aria-selected="${i === 0}">${icon(item.ic)}<span>${highlight(item.label, q)}</span><small>${esc(item.hint)}</small></button>`;
-  }).join("") || `<div class="empty"><span>No matches</span></div>`;
-  paletteInput.setAttribute("aria-activedescendant", paletteItems.length ? "pi-0" : "");
+  // Options are grouped with role="group", each labelled by its visible heading.
+  const groups = [];
+  paletteItems.forEach((item, i) => {
+    if (groups.at(-1)?.name !== item.group) groups.push({ name: item.group, items: [] });
+    groups.at(-1).items.push(`<button class="palette-item" type="button" role="option" tabindex="-1" id="pi-${i}" data-index="${i}" aria-selected="${i === 0}">${icon(item.ic)}<span>${highlight(item.label, q)}</span><small>${esc(item.hint)}</small></button>`);
+  });
+  paletteList.innerHTML = groups.map((g, k) => `<div role="group" aria-labelledby="pg-${k}"><div class="palette-group" id="pg-${k}" role="presentation">${esc(g.name)}</div>${g.items.join("")}</div>`).join("")
+    || `<div class="empty" role="presentation"><span>No matches</span></div>`;
+  if (paletteItems.length) paletteInput.setAttribute("aria-activedescendant", "pi-0");
+  else paletteInput.removeAttribute("aria-activedescendant");
 }
 function movePalette(delta) {
   if (!paletteItems.length) return;
@@ -691,6 +777,15 @@ paletteInput.addEventListener("keydown", (event) => {
   if (event.key === "ArrowUp") { event.preventDefault(); movePalette(-1); }
   if (event.key === "Enter") { event.preventDefault(); choosePalette(paletteIndex); }
 });
+// Focus can land on an option after a pointer press; arrows keep working there.
+paletteList.addEventListener("keydown", (event) => {
+  if (event.key !== "ArrowDown" && event.key !== "ArrowUp") return;
+  event.preventDefault();
+  const focused = event.target.closest(".palette-item");
+  if (focused) paletteIndex = Number(focused.dataset.index);
+  movePalette(event.key === "ArrowDown" ? 1 : -1);
+  $(`#pi-${paletteIndex}`)?.focus();
+});
 paletteList.addEventListener("click", (event) => {
   const item = event.target.closest(".palette-item");
   if (item) choosePalette(Number(item.dataset.index));
@@ -699,10 +794,14 @@ palette.addEventListener("click", (event) => { if (event.target === palette) pal
 $("#palette-open").addEventListener("click", openPalette);
 $("#switcher").addEventListener("click", openPalette);
 
+const VIEW_LABELS = { overview: "Overview", catalog: "Catalog", inventory: "Inventory", decisions: "Decisions" };
+// Updates the switcher and document title; returns the label announced for the route.
 function updateSwitcher(route) {
   const project = route.project && (state.details.get(route.project) || state.projects?.find((p) => p.id === route.project));
   $("#switcher-label").textContent = project ? project.name : "All projects";
-  document.title = project ? `${project.name} · Tessera Studio` : "Tessera Studio";
+  const view = VIEW_LABELS[route.view] || VIEW_LABELS.overview;
+  document.title = project ? `${view} · ${project.name} · Tessera Studio` : "Tessera Studio";
+  return project ? `${project.name}, ${view}` : "All projects";
 }
 
 $("#refresh").addEventListener("click", async () => {
