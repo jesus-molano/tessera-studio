@@ -240,6 +240,7 @@ async function homeView() {
       <div>
         <h2><span>${esc(p.name)}</span><span class="project-arrow">${icon("arrow")}</span></h2>
         <div class="project-path" title="${esc(p.repo_path || p.store)}">${esc(p.repo_path || p.id)}</div>
+        ${p.legacy ? `<div class="project-path" title="${esc(p.store)}">Older store — adopt it with tessera.py adopt-store</div>` : ""}
       </div>
       ${statusPill(p)}
       <div class="stats">
@@ -380,7 +381,7 @@ function overviewView(project) {
           <dt>Reviewed revision</dt><dd class="mono">${esc(project.revision || "—")}</dd>
           <dt>Inventory revision</dt><dd class="mono">${esc(project.inventory_revision || "—")}</dd>
           <dt>Catalog snapshots</dt><dd>${nf.format(project.history)} in history</dd>
-          <dt>Store</dt><dd class="mono">${esc(project.store)}</dd>
+          <dt>Store</dt><dd class="mono">${esc(project.store)}${project.legacy ? " (older store: adopt it with <code>tessera.py adopt-store</code>)" : ""}</dd>
         </dl>
       </section>
     </div>`;

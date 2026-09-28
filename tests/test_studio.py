@@ -9,7 +9,10 @@ import unittest
 from pathlib import Path
 
 from tessera_studio.server import create_server
-from tessera_studio.store import NotFound, Store
+import os
+from unittest import mock
+
+from tessera_studio.store import NotFound, Store, default_roots
 
 PID = "a" * 64
 OTHER = "b" * 64
@@ -322,3 +325,27 @@ class ServerErrorTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RootsTest(unittest.TestCase):
+    def test_current_store_comes_first_then_older_windows_stores(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            (base / "local/Packages/Claude_x").mkdir(parents=True)
+            env = {"TESSERA_HOME": str(base / "home/tessera"), "LOCALAPPDATA": str(base / "local")}
+            with mock.patch.dict(os.environ, env):
+                roots = default_roots()
+        self.assertEqual(roots, [base / "home/tessera/projects", base / "local/tessera/projects",
+                                 base / "local/Packages/Claude_x/LocalCache/Local/tessera/projects"])
+
+    def test_current_copy_wins_and_older_copies_are_flagged(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            current, old = Path(tmp) / "current", Path(tmp) / "old"
+            build_store(current)
+            build_store(old)
+            only_old = "e" * 64
+            write(old / only_old / "catalog.json", {"schema": 1, "project": "OnlyOld", "entries": []})
+            projects = {p["id"]: p for p in Store([current, old]).projects()}
+        self.assertEqual(projects[PID]["store"], str(current / PID))
+        self.assertFalse(projects[PID]["legacy"])
+        self.assertTrue(projects[only_old]["legacy"])
