@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="color-scheme" content="dark">
+  <title>Tessera Studio</title>
+  <link rel="icon" href="/favicon.svg" type="image/svg+xml">
+  <link rel="stylesheet" href="/app.css">
+  <script type="module" src="/app.js"></script>
+</head>
+<body>
+  <header class="appbar">
+    <a class="brand" href="#/" aria-label="Tessera Studio, all projects">
+      <svg class="mark" viewBox="0 0 26 26" aria-hidden="true">
+        <rect x="1" y="1" width="11" height="11" rx="2.5"/>
+        <rect x="14" y="1" width="11" height="11" rx="2.5"/>
+        <rect x="1" y="14" width="11" height="11" rx="2.5"/>
+        <rect x="14" y="14" width="11" height="11" rx="2.5"/>
+      </svg>
+      <span>Tessera <small>Studio</small></span>
+    </a>
+    <span class="crumb-sep hide-sm" aria-hidden="true">/</span>
+    <button class="switcher" id="switcher" type="button" aria-haspopup="dialog">
+      <span id="switcher-label">All projects</span>
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="m7 15 5 5 5-5M7 9l5-5 5 5"/></svg>
+    </button>
+    <div class="spacer"></div>
+    <button class="ghost-button" id="refresh" type="button" aria-label="Reload data from disk">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><path d="M21 12a9 9 0 1 1-2.64-6.36M21 3v6h-6"/></svg>
+      <span class="hide-sm">Reload</span>
+    </button>
+    <button class="ghost-button hide-sm" id="palette-open" type="button" aria-label="Open command palette">
+      <kbd>Ctrl</kbd><kbd>K</kbd>
+    </button>
+  </header>
+
+  <main id="app" tabindex="-1" aria-live="polite"></main>
+
+  <dialog class="palette" id="palette" aria-label="Command palette">
+    <div class="search">
+      <svg class="icon" viewBox="0 0 24 24" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="m20 20-3.5-3.5"/></svg>
+      <input id="palette-input" type="text" placeholder="Jump to a project, view or catalog entry…" aria-label="Search commands" autocomplete="off" spellcheck="false" role="combobox" aria-controls="palette-list" aria-expanded="true">
+    </div>
+    <div class="palette-list" id="palette-list" role="listbox"></div>
+    <div class="palette-foot"><span><kbd>↑</kbd> <kbd>↓</kbd> navigate</span><span><kbd>Enter</kbd> open</span><span><kbd>Esc</kbd> close</span></div>
+  </dialog>
+
+  <div class="tooltip" id="tooltip" role="tooltip"></div>
+</body>
+</html>

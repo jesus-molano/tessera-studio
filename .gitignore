@@ -1,0 +1,10 @@
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+.venv/
+# Never commit Tessera data or screenshots of work projects.
+tessera/
+projects/
+*.png
