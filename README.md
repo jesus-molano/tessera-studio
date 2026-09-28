@@ -23,16 +23,20 @@ python -m tessera_studio --open
 Options: `--port 8765` (use `0` for a free port) and `--store PATH` (repeatable) to add more
 `tessera/projects` directories.
 
-Default store locations, matching `tessera.py`:
+Default store locations, matching `tessera.py`, in lookup order:
 
-| Platform | Directory |
+| Order | Directory |
 |---|---|
-| Linux | `${XDG_DATA_HOME:-~/.local/share}/tessera/projects` |
-| Windows | `%LOCALAPPDATA%\tessera\projects` |
-| Windows (MSIX apps such as Claude Desktop) | `%LOCALAPPDATA%\Packages\<app>\LocalCache\Local\tessera\projects` |
+| 1. Current store, every platform | `$TESSERA_HOME/projects`, else `${XDG_DATA_HOME:-~/.local/share}/tessera/projects` (on Windows `%USERPROFILE%\.local\share\tessera\projects`) |
+| 2. Older Windows store | `%LOCALAPPDATA%\tessera\projects` |
+| 3. Older MSIX app copies (Claude Desktop, Codex) | `%LOCALAPPDATA%\Packages\<app>\LocalCache\Local\tessera\projects` |
 
-Packaged Windows apps virtualize `%LOCALAPPDATA%`, so catalogs written by an agent
-running inside them only exist in that app's `LocalCache`. Studio scans both.
+MSIX apps virtualize `%LOCALAPPDATA%`, so catalogs written by an agent running
+inside them used to exist only in that app's `LocalCache`. `tessera.py` now keeps
+the store in the user profile and copies an older one with
+`tessera.py adopt-store --repo PROJECT --from PATH`. When the same project exists
+in several places, Studio shows the current store's copy; projects found only in
+an older store are marked so you can adopt them.
 
 ## Privacy and safety
 

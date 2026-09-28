@@ -24,25 +24,42 @@ class NotFound(Exception):
     pass
 
 
-def default_roots() -> list[Path]:
-    """Store roots in the same order ``tessera.py`` uses, plus sandboxed app caches.
+def data_home() -> Path:
+    """The current store, as ``tessera.py`` resolves it (see its ``tessera_paths``)."""
+    if os.environ.get("TESSERA_HOME"):
+        return Path(os.environ["TESSERA_HOME"])
+    return Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share")) / "tessera"
 
-    Desktop apps packaged with MSIX on Windows (such as Claude) virtualize
-    ``%LOCALAPPDATA%``: files written by agents appear under
-    ``Packages/<app>/LocalCache/Local`` for every other process.
+
+def legacy_roots() -> list[Path]:
+    """Earlier Windows stores: the real ``%LOCALAPPDATA%`` and each MSIX app's private copy.
+
+    Desktop apps packaged with MSIX (Claude Desktop, Codex) virtualize
+    ``%LOCALAPPDATA%``, so catalogs written there only exist under
+    ``Packages/<app>/LocalCache/Local``. ``tessera.py`` now writes to the user
+    profile instead and can adopt these with ``adopt-store``.
     """
-    roots = []
-    if os.name == "nt":
-        local = Path(os.environ.get("LOCALAPPDATA", Path.home() / "AppData/Local"))
-        roots.append(local / "tessera/projects")
-        packages = local / "Packages"
-        try:
-            roots += sorted(p / "LocalCache/Local/tessera/projects" for p in packages.iterdir() if p.is_dir())
-        except OSError:
-            pass
-    else:
-        base = Path(os.environ.get("XDG_DATA_HOME", Path.home() / ".local/share"))
-        roots.append(base / "tessera/projects")
+    local = os.environ.get("LOCALAPPDATA") or (str(Path.home() / "AppData/Local") if os.name == "nt" else "")
+    if not local:
+        return []
+    base = Path(local)
+    roots = [base / "tessera/projects"]
+    try:
+        roots += sorted(p / "LocalCache/Local/tessera/projects" for p in (base / "Packages").iterdir() if p.is_dir())
+    except OSError:
+        pass
+    return roots
+
+
+def default_roots() -> list[Path]:
+    """Current store first, so it wins over an older copy of the same project."""
+    current = data_home() / "projects"
+    seen, roots = set(), []
+    for root in (current, *legacy_roots()):
+        key = os.path.normcase(str(root))
+        if key not in seen:
+            seen.add(key)
+            roots.append(root)
     return roots
 
 
@@ -153,6 +170,7 @@ class Store:
             "name": as_text(catalog.get("project")) or self._repo_name(directory) or project_id[:12],
             "repo_path": self._repo_path(directory),
             "store": str(directory),
+            "legacy": self._legacy(directory),
             "initialized": bool(catalog),
             "entries": len(entries),
             "kinds": Counter(e["kind"] for e in entries).most_common(),
@@ -166,9 +184,13 @@ class Store:
             "updated": self._updated(directory),
         }
 
+    def _legacy(self, directory: Path) -> bool:
+        """Served from an older store: adopt it with ``tessera.py adopt-store``."""
+        return bool(self.roots) and directory.parent != self.roots[0]
+
     @staticmethod
     def _broken_summary(project_id: str, directory: Path) -> dict:
-        return {"id": project_id, "name": project_id[:12], "repo_path": None, "store": str(directory),
+        return {"id": project_id, "name": project_id[:12], "repo_path": None, "store": str(directory), "legacy": False,
                 "initialized": False, "entries": 0, "kinds": [], "files": 0, "reviewed": 0, "decisions": 0,
                 "revision": None, "reviewed_on": None, "finalized": False, "updated": _mtime(directory)}
 
